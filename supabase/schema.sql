@@ -57,6 +57,12 @@ alter table chunks enable row level security;
 
 -- Для старта (один пользователь, anon-доступ) — простые политики.
 -- Позже замени на auth.uid()-политики.
+-- DROPы нужны, чтобы скрипт можно было запускать повторно.
+drop policy if exists "allow all" on notes;
+drop policy if exists "allow all" on pixels;
+drop policy if exists "allow all" on dimensions;
+drop policy if exists "allow all" on links;
+drop policy if exists "allow all" on chunks;
 create policy "allow all" on notes for all using (true) with check (true);
 create policy "allow all" on pixels for all using (true) with check (true);
 create policy "allow all" on dimensions for all using (true) with check (true);
