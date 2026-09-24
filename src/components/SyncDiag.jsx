@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { db, getSetting } from '../lib/db.js'
 import { cloud, cloudEnabled, syncNow } from '../lib/supabase.js'
 
-const URL = import.meta.env.VITE_SUPABASE_URL
-const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
+// NB: имена SUPA_*, а не URL — const URL затенял бы глобальный URL-конструктор
+const SUPA_URL = import.meta.env.VITE_SUPABASE_URL
+const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 
 function hostOf(u) {
   try { return new URL(u).host } catch { return '—' }
@@ -39,9 +40,9 @@ export default function SyncDiag({ onSynced }) {
       r['время'] = new Date().toLocaleString('ru-RU')
       r['браузер'] = (navigator.userAgent || '').slice(0, 90)
       r['интернет (браузер)'] = navigator.onLine ? 'да' : 'НЕТ'
-      r['ключи в сборке|URL'] = URL ? 'задан' : 'НЕТ — только локальный режим'
-      r['ключи в сборке|хост'] = URL ? hostOf(URL) : '—'
-      r['ключи в сборке|anon key'] = KEY ? 'задан' : 'НЕТ'
+      r['ключи в сборке|URL'] = SUPA_URL ? 'задан' : 'НЕТ — только локальный режим'
+      r['ключи в сборке|хост'] = SUPA_URL ? hostOf(SUPA_URL) : '—'
+      r['ключи в сборке|anon key'] = SUPA_KEY ? 'задан' : 'НЕТ'
 
       try {
         const [notes, chunks, links, pixels, dims] = await Promise.all([
@@ -56,19 +57,21 @@ export default function SyncDiag({ onSynced }) {
       }
       r['последний синк'] = (await getSetting('lastSync', null)) || 'ещё не было'
 
-      // прямой доступ до Supabase (мимо библиотек): отличаем блок сети от плохого ключа
-      if (URL && KEY) {
+      // прямой доступ до Supabase (мимо библиотек): отличаем блок сети от плохого ключа.
+      // Бьём в notes?select=id&limit=1: 200/206 = всё ок; 401 = ключ/RLS; сетевая ошибка = блок.
+      // (корень /rest/v1/ отдаёт 401 даже с хорошим ключом — он не показатель)
+      if (SUPA_URL && SUPA_KEY) {
         try {
           const c = new AbortController()
           const t = setTimeout(() => c.abort(), 10000)
-          const resp = await fetch(`${URL}/rest/v1/`, { headers: { apikey: KEY }, signal: c.signal })
+          const resp = await fetch(`${SUPA_URL}/rest/v1/notes?select=id&limit=1`, { headers: { apikey: SUPA_KEY }, signal: c.signal })
           clearTimeout(t)
           r['прямой доступ|статус'] = resp.status
           r['прямой доступ|вывод'] =
-            resp.status === 404 ? 'сервер отвечает (404 на корень — норма)' :
-            resp.status === 401 ? 'ПЛОХОЙ КЛЮЧ (401)' :
+            resp.status === 200 || resp.status === 206 ? 'сервер отвечает, ключ принят' :
+            resp.status === 401 ? 'ПЛОХОЙ КЛЮЧ или RLS (401)' :
             `HTTP ${resp.status}`
-          r['прямой доступ|ok'] = resp.status === 404
+          r['прямой доступ|ok'] = resp.status === 200 || resp.status === 206
         } catch (e) {
           r['прямой доступ|вывод'] = e.name === 'AbortError'
             ? 'ТАЙМАУТ 10с — сеть режет supabase (нужен VPN/прокси)'
