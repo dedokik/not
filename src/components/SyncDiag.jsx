@@ -38,6 +38,7 @@ export default function SyncDiag({ onSynced }) {
     const r = {}
     try {
       r['время'] = new Date().toLocaleString('ru-RU')
+      try { r['сборка'] = typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : 'неизвестно' } catch { r['сборка'] = 'неизвестно' }
       r['браузер'] = (navigator.userAgent || '').slice(0, 90)
       r['интернет (браузер)'] = navigator.onLine ? 'да' : 'НЕТ'
       r['ключи в сборке|URL'] = SUPA_URL ? 'задан' : 'НЕТ — только локальный режим'
@@ -56,6 +57,21 @@ export default function SyncDiag({ onSynced }) {
         r['локально_ok'] = false
       }
       r['последний синк'] = (await getSetting('lastSync', null)) || 'ещё не было'
+
+      // какие именно заметки где: ловим расхождение наборов (устройства держат разные тройки)
+      try {
+        const localNotes = await db.notes.toArray()
+        r['названия локально'] = localNotes.map((n) => `${n.id}:${(n.title || '').slice(0, 40)}`).join(' | ') || '—'
+        const sb2 = cloud()
+        if (sb2) {
+          const cn = await sb2.from('notes').select('id,title').order('updated_at', { ascending: true })
+          r['названия в облаке'] = cn.error
+            ? `ОШИБКА: ${cn.error.message}`
+            : (cn.data || []).map((n) => `${String(n.id).slice(0, 8)}:${(n.title || '').slice(0, 40)}`).join(' | ') || '—'
+        }
+      } catch (e) {
+        r['названия'] = `не прочитались: ${e.message}`
+      }
 
       // прямой доступ до Supabase (мимо библиотек): отличаем блок сети от плохого ключа.
       // Бьём в notes?select=id&limit=1: 200/206 = всё ок; 401 = ключ/RLS; сетевая ошибка = блок.
