@@ -26,6 +26,7 @@ async function rememberCloudId(localId, cloudId) {
 }
 
 // Push заметки: upsert по cloudId, локально запоминаем соответствие.
+// Ошибки (напр. RLS) бросаем наружу — тихий "Ок" при незалитых данных хуже ошибки.
 async function pushNotes(sb) {
   const notes = await db.notes.toArray()
   for (const n of notes) {
@@ -38,10 +39,18 @@ async function pushNotes(sb) {
       updated_at: new Date(n.updatedAt).toISOString(),
     }
     if (existing) {
-      await sb.from('notes').update(row).eq('id', existing)
+      const { data, error } = await sb.from('notes').update(row).eq('id', existing).select('id')
+      if (error) throw new Error(`push: ${error.message}`)
+      if (!data || !data.length) {
+        // облачной строки уже нет (удалена) — создаём заново вместо зомби-маппинга
+        const ins = await sb.from('notes').insert(row).select('id').single()
+        if (ins.error) throw new Error(`push: ${ins.error.message}`)
+        if (ins.data) await rememberCloudId(`note:${n.id}`, ins.data.id)
+      }
     } else {
       const { data, error } = await sb.from('notes').insert(row).select('id').single()
-      if (!error && data) await rememberCloudId(`note:${n.id}`, data.id)
+      if (error) throw new Error(`push: ${error.message}`)
+      if (data) await rememberCloudId(`note:${n.id}`, data.id)
     }
   }
 }
@@ -73,9 +82,33 @@ async function pullNotes(sb) {
         n++
       }
     } else {
-      const id = await db.notes.add({ ...patch })
-      await rememberCloudId(`note:${id}`, r.id)
-      n++
+      // маппинга нет: может, это та же заметка с другого устройства
+      // (сиды «Добро пожаловать» есть на обоих!) — ищем локальную без маппинга
+      // с ТОЧНО таким же названием и усыновляем её вместо создания дубля
+      const mappedLocalIds = new Set(
+        Object.keys(map).filter((k) => k.startsWith('note:')).map((k) => Number(k.slice(5)))
+      )
+      const all = await db.notes.toArray()
+      const twin = all.find(
+        (l) => !mappedLocalIds.has(l.id) && (l.title || '').trim().toLowerCase() === (r.title || '').trim().toLowerCase()
+      )
+      if (twin) {
+        await rememberCloudId(`note:${twin.id}`, r.id)
+        // побеждает более свежая сторона, метку времени берём максимальную
+        if (twin.updatedAt >= patch.updatedAt) {
+          patch.title = twin.title
+          patch.body = twin.body
+          patch.dimension = twin.dimension
+          patch.estimateHours = twin.estimateHours
+          patch.updatedAt = twin.updatedAt
+        }
+        await db.notes.update(twin.id, patch)
+        n++
+      } else {
+        const id = await db.notes.add({ ...patch })
+        await rememberCloudId(`note:${id}`, r.id)
+        n++
+      }
     }
   }
   return n
@@ -165,6 +198,42 @@ async function pullRest(sb) {
     }
   }
   return { links, chunks }
+}
+
+// Разовая чистка дубликатов (одинаковое название): остаётся самая свежая,
+// остальные удаляются локально и в облаке. Запускать на КАЖДОМ устройстве.
+export async function cleanupDuplicates() {
+  const sb = cloud()
+  const all = await db.notes.toArray()
+  const byTitle = new Map()
+  for (const n of all) {
+    const t = (n.title || '').trim().toLowerCase()
+    if (!byTitle.has(t)) byTitle.set(t, [])
+    byTitle.get(t).push(n)
+  }
+  const map = await getSetting('cloudIds', {})
+  let removed = 0
+  for (const [, group] of byTitle) {
+    if (group.length < 2) continue
+    group.sort((a, b) => b.updatedAt - a.updatedAt)
+    const [, ...dups] = group
+    for (const d of dups) {
+      await db.transaction('rw', [db.notes, db.links, db.chunks], async () => {
+        await db.notes.delete(d.id)
+        await db.links.where('fromId').equals(d.id).delete()
+        await db.links.where('toId').equals(d.id).delete()
+        await db.chunks.where('noteId').equals(d.id).delete()
+      })
+      try {
+        const cid = map[`note:${d.id}`]
+        if (cid && sb) await sb.from('notes').delete().eq('id', cid)
+        delete map[`note:${d.id}`]
+      } catch { /* следующий pushRest подчистит остатки */ }
+      removed++
+    }
+  }
+  await setSetting('cloudIds', map)
+  return removed
 }
 
 export async function syncNow() {

@@ -5,7 +5,7 @@ import { parseDeadlines, firstDeadline, fmtDate } from './lib/dates.js'
 import { parseWikiLinks } from './lib/links.js'
 import { buildPlan, recalcMissed, toggleChunk, toggleHabit, todayISO, isHabit, parseEffort } from './lib/chunks.js'
 import * as pixelsLib from './lib/pixels.js'
-import { cloudEnabled, syncNow, cloud } from './lib/supabase.js'
+import { cloudEnabled, syncNow, cloud, cleanupDuplicates } from './lib/supabase.js'
 import GraphView from './components/GraphView.jsx'
 import MapView from './components/MapView.jsx'
 
@@ -250,6 +250,12 @@ export default function App() {
   }
 
   // явное «Сохранить»: сразу в локальную БД + синк в облако
+  const cleanup = async () => {
+    if (!confirm('Удалить дубликаты заметок с одинаковым названием? Останется самая свежая.')) return
+    const n = await cleanupDuplicates()
+    setSyncMsg(n ? `Убрано дубликатов: ${n}. Нажми Синк и повтори то же на втором устройстве.` : 'Дубликатов нет')
+    await refresh()
+  }
   const saveNow = async () => {
     if (!draft) return
     await db.notes.update(draft.id, {
@@ -489,6 +495,7 @@ export default function App() {
               <button onClick={addDim} className="px-2 py-1 rounded panel text-sm">+</button>
             </div>
             <button onClick={createNote} className="mt-3 w-full text-sm py-1.5 rounded accent-bg text-black font-semibold">+ Новая заметка</button>
+            <button onClick={cleanup} className="mt-2 w-full text-xs py-1 rounded panel opacity-70" title="Удалить заметки-дубликаты с одинаковым названием">Убрать дубликаты</button>
           </div>
           <div className="flex-1 overflow-auto p-2">
             {filtered.map((n) => {
