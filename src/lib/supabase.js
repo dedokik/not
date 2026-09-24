@@ -60,7 +60,9 @@ async function pullNotes(sb) {
   const lastSync = await getSetting('lastSync', null)
   const lastSyncMs = lastSync ? new Date(lastSync).getTime() : 0
   let q = sb.from('notes').select('*').order('updated_at', { ascending: true })
-  if (lastSync) q = q.gt('updated_at', lastSync)
+  // запас −5 мин: часы устройств расходятся, без него чужие правки со старым
+  // штампом выпадают из выборки навсегда и правило ниже их даже не видит
+  if (lastSync) q = q.gt('updated_at', new Date(lastSyncMs - 5 * 60 * 1000).toISOString())
   const { data, error } = await q
   if (error || !data) return 0
   const map = await getSetting('cloudIds', {})
@@ -81,8 +83,15 @@ async function pullNotes(sb) {
       // принимаем облако если оно новее ИЛИ если локальную не трогали со прошлого синка
       // (второе спасает при рассинхроне часов между устройствами: untreated local + changed cloud = берём cloud)
       if (local && (local.updatedAt < patch.updatedAt || (lastSyncMs && local.updatedAt <= lastSyncMs))) {
-        await db.notes.update(id, patch)
-        n++
+        // в окне повтора не перезаписываем идентичное — иначе вечный churn меток времени
+        const same = (local.title || '') === (patch.title || '') &&
+          (local.body || '') === (patch.body || '') &&
+          (local.dimension || '') === (patch.dimension || '') &&
+          Number(local.estimateHours || 0) === Number(patch.estimateHours || 0)
+        if (!same) {
+          await db.notes.update(id, patch)
+          n++
+        }
       }
     } else {
       // маппинга нет: может, это та же заметка с другого устройства
