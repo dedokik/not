@@ -236,7 +236,41 @@ export async function cleanupDuplicates() {
     }
   }
   await setSetting('cloudIds', map)
-  return removed
+  // облачные сироты: строки без локального маппинга (старые дубли + заметки,
+  // пропущенные pull-фильтром по дате). Дубль схлопываем в локальную (побеждает
+  // свежий), чужую новую — забираем себе.
+  let merged = 0, adopted = 0
+  try {
+    const { data: allCloud } = await sb.from('notes').select('*')
+    for (const r of allCloud || []) {
+      const isMapped = Object.values(map).includes(r.id)
+      if (isMapped) continue
+      const locals = await db.notes.toArray()
+      const twin = locals.find(
+        (l) => (l.title || '').trim().toLowerCase() === (r.title || '').trim().toLowerCase()
+      )
+      const rTs = new Date(r.updated_at).getTime() || Date.now()
+      if (twin) {
+        if (rTs > (twin.updatedAt || 0)) {
+          await db.notes.update(twin.id, {
+            title: r.title, body: r.body, dimension: r.dimension,
+            estimateHours: Number(r.estimate_hours) || 0, updatedAt: rTs,
+          })
+        }
+        await sb.from('notes').delete().eq('id', r.id)
+        merged++
+      } else {
+        const id = await db.notes.add({
+          title: r.title, body: r.body, dimension: r.dimension,
+          estimateHours: Number(r.estimate_hours) || 0, updatedAt: rTs,
+        })
+        map[`note:${id}`] = r.id
+        adopted++
+      }
+    }
+    await setSetting('cloudIds', map)
+  } catch { /* облако недоступно — локальная чистка уже сделана */ }
+  return { removed, merged, adopted }
 }
 
 export async function syncNow() {

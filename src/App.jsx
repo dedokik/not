@@ -303,8 +303,12 @@ export default function App() {
   // явное «Сохранить»: сразу в локальную БД + синк в облако
   const cleanup = async () => {
     if (!confirm('Удалить дубликаты заметок с одинаковым названием? Останется самая свежая.')) return
-    const n = await cleanupDuplicates()
-    setSyncMsg(n ? `Убрано дубликатов: ${n}. Нажми Синк и повтори то же на втором устройстве.` : 'Дубликатов нет')
+    const r = await cleanupDuplicates()
+    const parts = []
+    if (r.removed) parts.push(`дублей убрано: ${r.removed}`)
+    if (r.merged) parts.push(`облачных дублей схлопнуто: ${r.merged}`)
+    if (r.adopted) parts.push(`подобрано пропущенных: ${r.adopted}`)
+    setSyncMsg(parts.length ? `${parts.join(', ')}. Нажми Синк и повтори на втором устройстве.` : 'Дубликатов нет')
     await refresh()
   }
   const saveNow = async () => {
