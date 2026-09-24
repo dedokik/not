@@ -288,7 +288,7 @@ export default function App() {
   }
 
   const doSync = async () => {
-    if (syncing.current) return
+    if (syncing.current) { setSyncMsg('Синк уже идёт, подожди…'); return }
     syncing.current = true
     setSyncMsg('Синк…')
     try {

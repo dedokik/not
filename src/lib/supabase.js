@@ -9,9 +9,18 @@ const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 export const cloudEnabled = Boolean(URL && KEY)
 
 let client = null
+// fetch с таймаутом: БЕЗ него зависший запрос (сеть режет supabase тишиной,
+// VPN выключен и т.п.) висит вечно — флаг syncing застревает в true НАВСЕГДА,
+// и все последующие синки (авто и кнопка!) молча пропускаются до перезагрузки.
+// Именно так синк "умирает после первого раза", а ручная диагностика работает.
+function fetchWithTimeout(url, opts = {}, ms = 15000) {
+  const c = new AbortController()
+  const t = setTimeout(() => c.abort(), ms)
+  return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t))
+}
 export function cloud() {
   if (!cloudEnabled) return null
-  if (!client) client = createClient(URL, KEY)
+  if (!client) client = createClient(URL, KEY, { global: { fetch: (u, o) => fetchWithTimeout(u, o, 15000) } })
   return client
 }
 
