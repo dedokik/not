@@ -8,6 +8,7 @@ import * as pixelsLib from './lib/pixels.js'
 import { cloudEnabled, syncNow, cloud, cleanupDuplicates } from './lib/supabase.js'
 import GraphView from './components/GraphView.jsx'
 import MapView from './components/MapView.jsx'
+import SyncDiag from './components/SyncDiag.jsx'
 
 function getTasks(body) {
   const lines = (body || '').split('\n')
@@ -474,14 +475,14 @@ export default function App() {
         <b>Not</b>
         <span className="opacity-50 text-sm hidden sm:inline">Minimal Dark OS</span>
         <div className="flex-1" />
-        {['notes', 'calendar', 'graph', 'map'].map((t) => (
+        {['notes', 'calendar', 'graph', 'map', 'diag'].map((t) => (
           <button
             key={t}
             className="text-sm px-3 py-1 panel rounded"
             style={tab === t ? { borderColor: 'var(--accent)' } : {}}
             onClick={() => setTab(t)}
           >
-            {t === 'notes' ? 'Заметки' : t === 'calendar' ? 'Календарь' : t === 'graph' ? 'Граф' : 'Карта'}
+            {t === 'notes' ? 'Заметки' : t === 'calendar' ? 'Календарь' : t === 'graph' ? 'Граф' : t === 'map' ? 'Карта' : 'Диагностика'}
           </button>
         ))}
         <button onClick={doSync} className="text-sm px-3 py-1 panel rounded" title="Синхронизация с Supabase">
@@ -839,8 +840,12 @@ export default function App() {
                 activeId={activeId} onSelect={setActiveId} onOpen={openNote}
               />
             </div>
-          ) : (
+          ) : tab === 'map' ? (
             <MapView pixelRows={pixelRows} accent="#d1d5db" />
+          ) : (
+            <div className="max-w-3xl mx-auto">
+              <SyncDiag onSynced={refresh} />
+            </div>
           )}
         </main>
       </div>
