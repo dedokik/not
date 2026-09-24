@@ -112,15 +112,60 @@ async function pushRest(sb) {
   }
 }
 
+// Pull связей/чанков/пикселей: облако -> локально (идемпотентно, без дублей).
+async function pullRest(sb) {
+  const map = await getSetting('cloudIds', {})
+  const rev = Object.fromEntries(Object.entries(map).map(([k, v]) => [v, k]))
+  const localNoteId = (cloudUuid) => {
+    const k = rev[cloudUuid]
+    return k && k.startsWith('note:') ? Number(k.slice(5)) : null
+  }
+  let links = 0, chunks = 0
+  const { data: rl } = await sb.from('links').select('*')
+  for (const r of rl || []) {
+    const f = localNoteId(r.from_id), t = localNoteId(r.to_id)
+    if (!f || !t) continue
+    const all = await db.links.toArray()
+    if (!all.some((l) => l.fromId === f && l.toId === t)) {
+      await db.links.add({ fromId: f, toId: t })
+      links++
+    }
+  }
+  const { data: rc } = await sb.from('chunks').select('*')
+  for (const r of rc || []) {
+    const nid = localNoteId(r.note_id)
+    if (!nid) continue
+    const ex = await db.chunks.where('noteId').equals(nid).filter((c) => c.date === r.day).first()
+    if (ex) {
+      if (!!ex.done !== !!r.done || Number(ex.hours) !== Number(r.hours)) {
+        await db.chunks.update(ex.id, { hours: Number(r.hours), done: r.done ? 1 : 0 })
+        chunks++
+      }
+    } else {
+      await db.chunks.add({ noteId: nid, date: r.day, hours: Number(r.hours), done: r.done ? 1 : 0 })
+      chunks++
+    }
+  }
+  const { data: rp } = await sb.from('pixels').select('*')
+  for (const r of rp || []) {
+    const ex = await db.pixels.get([r.x, r.y])
+    if (!ex) {
+      await db.pixels.put({ x: r.x, y: r.y, noteId: localNoteId(r.note_id), openedAt: new Date(r.opened_at).getTime() || Date.now() })
+    }
+  }
+  return { links, chunks }
+}
+
 export async function syncNow() {
   const sb = cloud()
   if (!sb) return { ok: false, reason: 'Нет VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (.env)' }
   try {
     await pushNotes(sb)
     const pulled = await pullNotes(sb)
+    const rest = await pullRest(sb)
     await pushRest(sb)
     await setSetting('lastSync', new Date().toISOString())
-    return { ok: true, pulled }
+    return { ok: true, pulled, pulledLinks: rest.links, pulledChunks: rest.chunks }
   } catch (e) {
     return { ok: false, reason: String(e.message || e) }
   }

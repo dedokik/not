@@ -61,7 +61,9 @@ export default function App() {
   const [linkTarget, setLinkTarget] = useState('')
   const [newDimName, setNewDimName] = useState('')
   const [newDimColor, setNewDimColor] = useState('#a1a1aa')
+  const [editingDimId, setEditingDimId] = useState(null)
   const knownDims = useRef(new Set(DEFAULT_DIMS.map((d) => d.id)))
+  const syncing = useRef(false)
 
   const dimById = useMemo(() => Object.fromEntries(dims.map((d) => [d.id, d])), [dims])
 
@@ -105,7 +107,29 @@ export default function App() {
       const all = await db.notes.toArray()
       await recalcMissed(all)
       await refresh()
+      // тихий автосинк при старте, чтобы с другого устройства всё подтянулось само
+      if (cloudEnabled) {
+        const r = await syncNow()
+        if (r.ok) await refresh()
+        else setSyncMsg(`Автосинк: ${r.reason}`)
+      }
     })()
+  }, [])
+
+  // автосинк при возврате на вкладку (с телефона пришло — на ПК подтянется само)
+  useEffect(() => {
+    const onVis = async () => {
+      if (document.visibilityState !== 'visible' || !cloudEnabled || syncing.current) return
+      syncing.current = true
+      try {
+        const r = await syncNow()
+        if (r.ok) await refresh()
+      } finally {
+        syncing.current = false
+      }
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
   }, [])
 
   const active = useMemo(() => notes.find((n) => n.id === activeId) || null, [notes, activeId])
@@ -184,10 +208,44 @@ export default function App() {
   }
 
   const doSync = async () => {
+    if (syncing.current) return
+    syncing.current = true
     setSyncMsg('Синк…')
-    const r = await syncNow()
-    setSyncMsg(r.ok ? `Ок, подтянуто: ${r.pulled}` : `Ошибка: ${r.reason}`)
-    if (r.ok) await refresh()
+    try {
+      const r = await syncNow()
+      setSyncMsg(r.ok ? `Ок: заметок ${r.pulled}, чанков ${r.pulledChunks || 0}` : `Ошибка: ${r.reason}`)
+      if (r.ok) await refresh()
+    } finally {
+      syncing.current = false
+    }
+  }
+
+  // явное «Сохранить»: сразу в локальную БД + синк в облако
+  const saveNow = async () => {
+    if (!draft) return
+    await db.notes.update(draft.id, {
+      title: draft.title, body: draft.body, dimension: draft.dimension,
+      estimateHours: Number(draft.estimateHours) || 0, updatedAt: Date.now(),
+    })
+    await refresh()
+    const t = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+    if (!cloudEnabled) {
+      setSyncMsg(`Сохранено локально в ${t} (нет ключей Supabase)`)
+      return
+    }
+    if (syncing.current) {
+      setSyncMsg(`Сохранено локально в ${t}, синк уже идёт`)
+      return
+    }
+    syncing.current = true
+    setSyncMsg('Сохраняю и синкаю…')
+    try {
+      const r = await syncNow()
+      setSyncMsg(r.ok ? `Сохранено и синкнуто в ${t}` : `Сохранено локально в ${t}. Синк: ${r.reason}`)
+      if (r.ok) await refresh()
+    } finally {
+      syncing.current = false
+    }
   }
 
   // --- ручные связи ---
@@ -304,21 +362,41 @@ export default function App() {
           <div className="p-3 border-b" style={{ borderColor: 'var(--border)' }}>
             <div className="text-xs uppercase opacity-50 mb-2">Измерения</div>
             {dims.map((d) => (
-              <div key={d.id} className="flex items-center gap-2 py-1 text-sm">
-                <input type="checkbox" checked={enabledDims.has(d.id)} onChange={() => toggleDim(d.id)} title="Показать/скрыть слой" />
+              <div key={d.id} className="flex items-center gap-2 py-1.5 text-sm">
+                <input
+                  type="checkbox" checked={enabledDims.has(d.id)} onChange={() => toggleDim(d.id)} title="Показать/скрыть слой"
+                  className="w-5 h-5 shrink-0 cursor-pointer"
+                />
                 <input
                   type="color" value={d.color} title="Цвет измерения"
                   onChange={(e) => changeDimColor(d.id, e.target.value)}
-                  style={{ width: 26, height: 20, padding: 0, background: 'none', border: 'none', cursor: 'pointer' }}
+                  style={{ width: 34, height: 28, padding: 0, background: 'none', border: 'none', cursor: 'pointer' }}
+                  className="shrink-0"
                 />
-                <input
-                  type="text" value={d.name} title="Переименовать"
-                  onChange={(e) => renameDimLive(d.id, e.target.value)}
-                  onBlur={() => saveDimName(d.id)}
-                  className="flex-1 min-w-0 rounded px-1 py-0.5 text-sm"
-                />
+                {editingDimId === d.id ? (
+                  <input
+                    autoFocus
+                    type="text" value={d.name}
+                    onChange={(e) => renameDimLive(d.id, e.target.value)}
+                    onBlur={() => { saveDimName(d.id); setEditingDimId(null) }}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') e.target.blur() }}
+                    className="flex-1 min-w-0 rounded px-2 py-1 text-sm"
+                  />
+                ) : (
+                  <button
+                    onClick={() => toggleDim(d.id)} title="Нажми, чтобы показать/скрыть слой"
+                    className="flex-1 min-w-0 text-left truncate rounded px-2 py-1.5 cursor-pointer"
+                    style={enabledDims.has(d.id) ? {} : { opacity: 0.4 }}
+                  >
+                    {d.name}
+                  </button>
+                )}
+                <button
+                  className="opacity-50 hover:opacity-100 px-1 text-sm shrink-0" title="Переименовать"
+                  onClick={() => setEditingDimId(editingDimId === d.id ? null : d.id)}
+                >✎</button>
                 {dims.length > 1 && (
-                  <button className="opacity-40 hover:opacity-100 text-xs" title="Удалить измерение (заметки перейдут в другое)" onClick={() => deleteDim(d.id)}>✕</button>
+                  <button className="opacity-40 hover:opacity-100 text-xs shrink-0" title="Удалить измерение (заметки перейдут в другое)" onClick={() => deleteDim(d.id)}>✕</button>
                 )}
               </div>
             ))}
@@ -396,6 +474,9 @@ export default function App() {
                     </button>
                   ))}
                   <div className="flex-1" />
+                  <button onClick={saveNow} className="px-4 py-1 rounded accent-bg text-black font-semibold text-sm">
+                    Сохранить
+                  </button>
                   <button onClick={() => setPreview(!preview)} className="px-3 py-1 rounded panel text-sm">
                     {preview ? 'Редактировать' : 'Превью'}
                   </button>
