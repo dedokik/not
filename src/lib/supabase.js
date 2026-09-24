@@ -58,6 +58,7 @@ async function pushNotes(sb) {
 // Pull: забираем облачные заметки новее lastSync, которых нет локально / которые новее.
 async function pullNotes(sb) {
   const lastSync = await getSetting('lastSync', null)
+  const lastSyncMs = lastSync ? new Date(lastSync).getTime() : 0
   let q = sb.from('notes').select('*').order('updated_at', { ascending: true })
   if (lastSync) q = q.gt('updated_at', lastSync)
   const { data, error } = await q
@@ -77,7 +78,9 @@ async function pullNotes(sb) {
     if (localKey && localKey.startsWith('note:')) {
       const id = Number(localKey.slice(5))
       const local = await db.notes.get(id)
-      if (local && local.updatedAt < patch.updatedAt) {
+      // принимаем облако если оно новее ИЛИ если локальную не трогали со прошлого синка
+      // (второе спасает при рассинхроне часов между устройствами: untreated local + changed cloud = берём cloud)
+      if (local && (local.updatedAt < patch.updatedAt || (lastSyncMs && local.updatedAt <= lastSyncMs))) {
         await db.notes.update(id, patch)
         n++
       }

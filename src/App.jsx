@@ -63,6 +63,8 @@ export default function App() {
   const [calView, setCalView] = useState('month') // month | week
   const [weekAnchor, setWeekAnchor] = useState(() => new Date())
   const [syncMsg, setSyncMsg] = useState('')
+  const [lastSyncAt, setLastSyncAt] = useState('')
+  const markSynced = () => setLastSyncAt(new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }))
   const [linkTarget, setLinkTarget] = useState('')
   const [newDimName, setNewDimName] = useState('')
   const [newDimColor, setNewDimColor] = useState('#a1a1aa')
@@ -138,13 +140,37 @@ export default function App() {
       // тихий автосинк при старте, чтобы с другого устройства всё подтянулось само
       if (cloudEnabled) {
         const r = await syncNow()
-        if (r.ok) await refresh()
+        if (r.ok) { await refresh(); markSynced() }
         else setSyncMsg(`Автосинк: ${r.reason}`)
       }
     })()
   }, [])
 
   // автосинк при возврате на вкладку (с телефона пришло — на ПК подтянется само)
+  // + периодический фоновый опрос, чтобы открытое приложение тоже подтягивало
+  const bgSyncRef = useRef(null)
+  bgSyncRef.current = async () => {
+    if (!cloudEnabled || syncing.current || document.visibilityState !== 'visible') return
+    syncing.current = true
+    try {
+      const r = await syncNow()
+      if (r.ok) { await refresh(); markSynced() }
+    } finally {
+      syncing.current = false
+    }
+  }
+  useEffect(() => {
+    if (!cloudEnabled) return
+    const tick = () => bgSyncRef.current?.()
+    const id = setInterval(tick, 30000)
+    window.addEventListener('online', tick)
+    window.addEventListener('focus', tick)
+    return () => {
+      clearInterval(id)
+      window.removeEventListener('online', tick)
+      window.removeEventListener('focus', tick)
+    }
+  }, [])
   // + перерасчёт пропущенных дней (день мог смениться без перезагрузки)
   useEffect(() => {
     const onVis = async () => {
@@ -155,6 +181,7 @@ export default function App() {
         const all2 = await db.notes.toArray()
         const t = await recalcMissed(all2)
         if (r.ok || t) await refresh()
+        if (r.ok) markSynced()
       } finally {
         syncing.current = false
       }
@@ -266,7 +293,7 @@ export default function App() {
     try {
       const r = await syncNow()
       setSyncMsg(r.ok ? `Ок: заметок ${r.pulled}, чанков ${r.pulledChunks || 0}` : `Ошибка: ${r.reason}`)
-      if (r.ok) await refresh()
+      if (r.ok) { await refresh(); markSynced() }
     } finally {
       syncing.current = false
     }
@@ -300,7 +327,7 @@ export default function App() {
     try {
       const r = await syncNow()
       setSyncMsg(r.ok ? `Сохранено и синкнуто в ${t}` : `Сохранено локально в ${t}. Синк: ${r.reason}`)
-      if (r.ok) await refresh()
+      if (r.ok) { await refresh(); markSynced() }
     } finally {
       syncing.current = false
     }
@@ -460,6 +487,9 @@ export default function App() {
         <button onClick={doSync} className="text-sm px-3 py-1 panel rounded" title="Синхронизация с Supabase">
           {cloudEnabled ? 'Синк' : 'Локально'}
         </button>
+        {cloudEnabled && lastSyncAt && (
+          <span className="text-[11px] opacity-50 hidden sm:inline" title="Последний успешный синк">· {lastSyncAt}</span>
+        )}
       </header>
       {syncMsg && <div className="text-xs px-4 py-1 opacity-70 border-b" style={{ borderColor: 'var(--border)' }}>{syncMsg}</div>}
 
