@@ -69,6 +69,23 @@ export default function App() {
   const [editingDimId, setEditingDimId] = useState(null)
   const knownDims = useRef(new Set(DEFAULT_DIMS.map((d) => d.id)))
   const syncing = useRef(false)
+  const autoPushTimer = useRef(null)
+
+  // автопуш в облако через 8 сек после последнего изменения (тихо, без спама статусами)
+  const scheduleAutoPush = () => {
+    if (!cloudEnabled) return
+    if (autoPushTimer.current) clearTimeout(autoPushTimer.current)
+    autoPushTimer.current = setTimeout(async () => {
+      if (syncing.current || document.visibilityState !== 'visible') return
+      syncing.current = true
+      try {
+        const r = await syncNow()
+        if (r.ok) await refresh()
+      } finally {
+        syncing.current = false
+      }
+    }, 8000)
+  }
 
   const dimById = useMemo(() => Object.fromEntries(dims.map((d) => [d.id, d])), [dims])
 
@@ -150,7 +167,7 @@ export default function App() {
   const [draft, setDraft] = useState(null)
   useEffect(() => { setDraft(active ? { ...active } : null); setPreview(false); setLinkTarget('') }, [activeId])
 
-  useDebouncedSave(draft, refresh)
+  useDebouncedSave(draft, () => { refresh(); scheduleAutoPush() })
 
   const toggleDim = (id) => {
     setEnabledDims((prev) => {
@@ -166,6 +183,7 @@ export default function App() {
     setDims((prev) => prev.map((d) => (d.id === id ? { ...d, color } : d)))
     const row = await db.dimensions.get(id)
     if (row) await db.dimensions.put({ ...row, color })
+    scheduleAutoPush()
   }
   const renameDimLive = (id, name) => {
     setDims((prev) => prev.map((d) => (d.id === id ? { ...d, name } : d)))
@@ -175,6 +193,7 @@ export default function App() {
     const cur = dims.find((d) => d.id === id)
     if (row && cur && cur.name.trim()) await db.dimensions.put({ ...row, name: cur.name.trim() })
     else if (row && cur) setDims((prev) => prev.map((d) => (d.id === id ? { ...d, name: row.name } : d)))
+    scheduleAutoPush()
   }
   const addDim = async () => {
     const name = newDimName.trim()
@@ -190,6 +209,7 @@ export default function App() {
     setDims((prev) => [...prev, { id, name, color: newDimColor }])
     setEnabledDims((prev) => new Set(prev).add(id))
     setNewDimName('')
+    scheduleAutoPush()
   }
   const deleteDim = async (id) => {
     if (dims.length <= 1) return
@@ -202,6 +222,7 @@ export default function App() {
     setEnabledDims((prev) => { const n = new Set(prev); n.delete(id); return n })
     if (draft && draft.dimension === id) setDraft({ ...draft, dimension: target.id })
     await refresh()
+    scheduleAutoPush()
   }
 
   const filtered = useMemo(() => notes.filter((n) => enabledDims.has(n.dimension)), [notes, enabledDims])
@@ -213,6 +234,7 @@ export default function App() {
     await refresh()
     setActiveId(id)
     setTab('notes')
+    scheduleAutoPush()
   }
 
   const deleteNote = async (id) => {
@@ -234,6 +256,7 @@ export default function App() {
     } catch { /* офлайн — облако подчистится следующим pushRest */ }
     if (activeId === id) setActiveId(null)
     await refresh()
+    scheduleAutoPush()
   }
 
   const doSync = async () => {
@@ -292,10 +315,12 @@ export default function App() {
     if (!dup) await db.links.add({ fromId: draft.id, toId })
     setLinkTarget('')
     await refresh()
+    scheduleAutoPush()
   }
   const removeLink = async (id) => {
     await db.links.delete(id)
     await refresh()
+    scheduleAutoPush()
   }
 
   // --- чанки ---
@@ -314,10 +339,12 @@ export default function App() {
     if (!r.ok) setSyncMsg(`План: ${r.reason}`)
     else setSyncMsg('')
     await refresh()
+    scheduleAutoPush()
   }
   const onToggleChunk = async (c) => {
     await toggleChunk(c, pixelsLib)
     await refresh()
+    scheduleAutoPush()
   }
 
   // --- календарь ---
@@ -373,6 +400,7 @@ export default function App() {
   const onToggleHabit = async (noteId, date) => {
     await toggleHabit(noteId, date, pixelsLib)
     await refresh()
+    scheduleAutoPush()
   }
 
   // неделя: Пн–Вс от якоря
