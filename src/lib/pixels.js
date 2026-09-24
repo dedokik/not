@@ -4,7 +4,12 @@ import { db, pixelCoord, MAP_W, MAP_H } from './db.js'
 const CAP = MAP_W * MAP_H
 
 export async function openForChunk(chunk) {
-  const n = await db.pixels.count()
+  // первая свободная клетка, а не count: после частичных снятий count
+  // указывал бы на занятую координату и перезаписывал чужой пиксель
+  const keys = await db.pixels.toCollection().primaryKeys()
+  const used = new Set(keys.map(([x, y]) => y * MAP_W + x))
+  let n = 0
+  while (n < CAP && used.has(n)) n++
   if (n >= CAP) return null
   const { x, y } = pixelCoord(n)
   const row = { x, y, noteId: chunk.noteId, openedAt: Date.now() }

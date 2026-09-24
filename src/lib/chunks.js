@@ -47,15 +47,19 @@ export async function buildPlan(note) {
   const days = eachDayISO(todayISO(), dl.date).filter((d) => d >= todayISO())
   if (!days.length) return { ok: false, reason: 'Дедлайн прошёл' }
 
-  // удаляем незавершённые, делим остаток поровну
-  await db.chunks.where('noteId').equals(note.id).filter((c) => !c.done).delete()
-  const per = round1(rest / days.length)
-  const rows = days.map((day, i) => ({
-    noteId: note.id,
-    date: day,
-    hours: i === days.length - 1 ? round1(rest - per * (days.length - 1)) : per,
-    done: 0,
-  }))
+  // удаляем незавершённые НЕ-привычки, делим остаток поровну в десятых часа.
+  // Десятые делим нацело: дни без часов пропускаем, отрицательных чанков быть не может.
+  await db.chunks.where('noteId').equals(note.id).filter((c) => !c.done && !c.habit).delete()
+  const total10 = Math.round(rest * 10)
+  const base = Math.floor(total10 / days.length)
+  let rem = total10 - base * days.length
+  const rows = []
+  for (const day of days) {
+    let h10 = base + (rem > 0 ? 1 : 0)
+    if (rem > 0) rem--
+    if (h10 <= 0) continue
+    rows.push({ noteId: note.id, date: day, hours: h10 / 10, done: 0 })
+  }
   await db.chunks.bulkAdd(rows)
   return { ok: true, chunks: await db.chunks.where('noteId').equals(note.id).toArray() }
 }
@@ -66,12 +70,18 @@ export async function recalcMissed(notes) {
   for (const n of notes) {
     const all = await db.chunks.where('noteId').equals(n.id).toArray()
     if (!all.length) continue
-    const missed = all.filter((c) => !c.done && c.date < todayISO())
+    const missed = all.filter((c) => !c.done && !c.habit && c.date < todayISO())
     if (!missed.length) continue
     const r = await buildPlan(n)
     if (r.ok) touched++
   }
   return touched
+}
+
+export const RE_HABIT = /ежедневно|каждый день/i
+
+export function isHabit(note) {
+  return RE_HABIT.test(`${note.title || ''}\n${note.body || ''}`)
 }
 
 export async function toggleChunk(chunk, pixels) {
@@ -81,5 +91,23 @@ export async function toggleChunk(chunk, pixels) {
     await pixels.openForChunk(chunk)
   } else {
     await pixels.closeForChunk(chunk)
+  }
+}
+
+// Привычка: чекбокс на каждый день. Строка создаётся в день первого выполнения.
+export async function toggleHabit(noteId, dateISO, pixels) {
+  const nid = Number(noteId)
+  const ex = await db.chunks.where('noteId').equals(nid).filter((c) => c.date === dateISO && !!c.habit).first()
+  if (!ex) {
+    await db.chunks.add({ noteId: nid, date: dateISO, hours: 0, done: 1, habit: 1 })
+    await pixels.openForChunk({ noteId: nid })
+    return
+  }
+  const done = ex.done ? 0 : 1
+  await db.chunks.update(ex.id, { done })
+  if (done) {
+    await pixels.openForChunk({ noteId: ex.noteId })
+  } else {
+    await pixels.closeForChunk({ noteId: ex.noteId })
   }
 }

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { db, DIMENSIONS as DEFAULT_DIMS, seedIfEmpty, seedDimensions } from './lib/db.js'
+import { db, DIMENSIONS as DEFAULT_DIMS, seedIfEmpty, seedDimensions, getSetting, setSetting } from './lib/db.js'
 import { parseDeadlines, firstDeadline, fmtDate } from './lib/dates.js'
 import { parseWikiLinks } from './lib/links.js'
-import { buildPlan, recalcMissed, toggleChunk, todayISO } from './lib/chunks.js'
+import { buildPlan, recalcMissed, toggleChunk, toggleHabit, todayISO, isHabit, parseEffort } from './lib/chunks.js'
 import * as pixelsLib from './lib/pixels.js'
-import { cloudEnabled, syncNow } from './lib/supabase.js'
+import { cloudEnabled, syncNow, cloud } from './lib/supabase.js'
 import GraphView from './components/GraphView.jsx'
 import MapView from './components/MapView.jsx'
 
@@ -26,6 +26,9 @@ function toggleTaskLine(body, lineIdx) {
   else if (/\[x\]/i.test(line)) lines[lineIdx] = line.replace(/\[x\]/i, '[ ]')
   return lines.join('\n')
 }
+
+// суммы часов без мусора типа 0.30000000000000004
+const f1 = (x) => Math.round(x * 10) / 10
 
 function useDebouncedSave(note, onSaved) {
   useEffect(() => {
@@ -57,6 +60,8 @@ export default function App() {
   const [preview, setPreview] = useState(false)
   const [cursor, setCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() } })
   const [selectedDay, setSelectedDay] = useState(null)
+  const [calView, setCalView] = useState('month') // month | week
+  const [weekAnchor, setWeekAnchor] = useState(() => new Date())
   const [syncMsg, setSyncMsg] = useState('')
   const [linkTarget, setLinkTarget] = useState('')
   const [newDimName, setNewDimName] = useState('')
@@ -67,6 +72,12 @@ export default function App() {
 
   const dimById = useMemo(() => Object.fromEntries(dims.map((d) => [d.id, d])), [dims])
 
+  // setState только если данные реально изменились — иначе каждый автосейв
+  // (раз в 400мс печати) дёргал бы ререндер всего дерева новыми массивами
+  const setIfChanged = (setter) => (next) => {
+    setter((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next))
+  }
+
   const refresh = async () => {
     const [all, al, ac, ap, ad] = await Promise.all([
       db.notes.orderBy('updatedAt').reverse().toArray(),
@@ -75,12 +86,12 @@ export default function App() {
       db.pixels.toArray(),
       db.dimensions.toArray(),
     ])
-    setNotes(all)
-    setLinks(al)
-    setChunks(ac)
-    setPixelRows(ap)
+    setIfChanged(setNotes)(all)
+    setIfChanged(setLinks)(al)
+    setIfChanged(setChunks)(ac)
+    setIfChanged(setPixelRows)(ap)
     if (ad.length) {
-      setDims(ad)
+      setIfChanged(setDims)(ad)
       // новые измерения включаем автоматически, выбор пользователя не трогаем
       setEnabledDims((prev) => {
         const next = new Set(prev)
@@ -117,13 +128,16 @@ export default function App() {
   }, [])
 
   // автосинк при возврате на вкладку (с телефона пришло — на ПК подтянется само)
+  // + перерасчёт пропущенных дней (день мог смениться без перезагрузки)
   useEffect(() => {
     const onVis = async () => {
       if (document.visibilityState !== 'visible' || !cloudEnabled || syncing.current) return
       syncing.current = true
       try {
         const r = await syncNow()
-        if (r.ok) await refresh()
+        const all2 = await db.notes.toArray()
+        const t = await recalcMissed(all2)
+        if (r.ok || t) await refresh()
       } finally {
         syncing.current = false
       }
@@ -165,8 +179,13 @@ export default function App() {
   const addDim = async () => {
     const name = newDimName.trim()
     if (!name) return
-    const id = `d${Date.now()}`
-    await db.dimensions.add({ id, name, color: newDimColor })
+    const id = `d${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`
+    try {
+      await db.dimensions.add({ id, name, color: newDimColor })
+    } catch {
+      setSyncMsg('Не удалось создать измерение, попробуй ещё раз')
+      return
+    }
     knownDims.current.add(id)
     setDims((prev) => [...prev, { id, name, color: newDimColor }])
     setEnabledDims((prev) => new Set(prev).add(id))
@@ -203,6 +222,16 @@ export default function App() {
       await db.links.where('toId').equals(id).delete()
       await db.chunks.where('noteId').equals(id).delete()
     })
+    // иначе удалённая заметка "воскреснет" следующим pull, а её cloudId сломает push пикселей по FK
+    try {
+      const map = await getSetting('cloudIds', {})
+      const cid = map[`note:${id}`]
+      if (cid && cloud()) await cloud().from('notes').delete().eq('id', cid)
+      if (cid) {
+        delete map[`note:${id}`]
+        await setSetting('cloudIds', map)
+      }
+    } catch { /* офлайн — облако подчистится следующим pushRest */ }
     if (activeId === id) setActiveId(null)
     await refresh()
   }
@@ -266,10 +295,14 @@ export default function App() {
   // --- чанки ---
   const rebuildPlan = async () => {
     if (!draft) return
-    await db.notes.update(draft.id, {
+    // оценка может прийти из текста («оценка: 6ч») — подтягиваем её и в поле ввода
+    const total = Number(draft.estimateHours) || parseEffort(`${draft.title}\n${draft.body}`)
+    const patch = {
       title: draft.title, body: draft.body, dimension: draft.dimension,
-      estimateHours: Number(draft.estimateHours) || 0, updatedAt: Date.now(),
-    })
+      estimateHours: total || 0, updatedAt: Date.now(),
+    }
+    await db.notes.update(draft.id, patch)
+    setDraft({ ...draft, ...patch })
     const fresh = await db.notes.get(draft.id)
     const r = await buildPlan(fresh)
     if (!r.ok) setSyncMsg(`План: ${r.reason}`)
@@ -312,6 +345,7 @@ export default function App() {
   const chunksByDate = useMemo(() => {
     const map = {}
     for (const c of chunks) {
+      if (c.habit) continue // привычки рисуем отдельно
       const n = noteById.get(c.noteId)
       if (!n || !enabledDims.has(n.dimension)) continue
       if (!map[c.date]) map[c.date] = []
@@ -323,7 +357,47 @@ export default function App() {
 
   const dayKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   const focusDay = selectedDay || new Date()
-  const focusChunks = chunksByDate[dayKey(focusDay)] || []
+  const focusKey = dayKey(focusDay)
+  const focusChunks = chunksByDate[focusKey] || []
+  // привычки: чекбокс на каждый день (строка в БД создаётся в день выполнения)
+  const habitItems = useMemo(() => filtered.filter(isHabit).map((note) => {
+    const row = chunks.find((c) => c.noteId === note.id && c.date === focusKey && c.habit)
+    return { chunk: row || { id: `habit-${note.id}`, noteId: note.id, date: focusKey, hours: 0, done: 0, habit: 1 }, note }
+  }), [filtered, chunks, focusKey])
+  const onToggleHabit = async (noteId, date) => {
+    await toggleHabit(noteId, date, pixelsLib)
+    await refresh()
+  }
+
+  // неделя: Пн–Вс от якоря
+  const weekCells = useMemo(() => {
+    const a = new Date(weekAnchor)
+    const mon = new Date(a)
+    mon.setDate(a.getDate() - ((a.getDay() + 6) % 7))
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(mon)
+      d.setDate(mon.getDate() + i)
+      return d
+    })
+  }, [weekAnchor])
+  const weekTitle = `${fmtDate(weekCells[0])} – ${fmtDate(weekCells[6])}`
+  const cells = calView === 'month' ? monthCells : weekCells
+  const stepCal = (dir) => {
+    if (calView === 'month') {
+      setCursor((c) => {
+        let { y, m } = c
+        m += dir
+        if (m < 0) { m = 11; y-- } else if (m > 11) { m = 0; y++ }
+        return { y, m }
+      })
+    } else {
+      setWeekAnchor((a) => { const d = new Date(a); d.setDate(d.getDate() + dir * 7); return d })
+    }
+  }
+  const switchCalView = (v) => {
+    setCalView(v)
+    if (v === 'week') setWeekAnchor(selectedDay || new Date())
+  }
 
   const today = new Date()
   const monthName = new Date(cursor.y, cursor.m, 1).toLocaleString('ru-RU', { month: 'long', year: 'numeric' })
@@ -385,7 +459,7 @@ export default function App() {
                 ) : (
                   <button
                     onClick={() => toggleDim(d.id)} title="Нажми, чтобы показать/скрыть слой"
-                    className="flex-1 min-w-0 text-left truncate rounded px-2 py-1.5 cursor-pointer"
+                    className="flex-1 min-w-0 text-left truncate rounded px-2 py-1.5 cursor-pointer select-none"
                     style={enabledDims.has(d.id) ? {} : { opacity: 0.4 }}
                   >
                     {d.name}
@@ -441,7 +515,7 @@ export default function App() {
                       дедлайн {fmtDate(dl.date)} · осталось {Math.ceil((dl.date - today) / 86400000)} дн.
                     </div>
                   )}
-                  {totH > 0 && <div className="text-xs mt-0.5 opacity-60">план {doneH}/{totH} ч.</div>}
+                  {totH > 0 && <div className="text-xs mt-0.5 opacity-60">план {f1(doneH)}/{f1(totH)} ч.</div>}
                 </div>
               )
             })}
@@ -466,11 +540,15 @@ export default function App() {
                   {dims.filter((d) => enabledDims.has(d.id)).map((d) => (
                     <button
                       key={d.id}
+                      type="button"
                       onClick={() => setDraft({ ...draft, dimension: d.id })}
-                      className="px-2 py-1 rounded panel flex items-center gap-1"
-                      style={draft.dimension === d.id ? { borderColor: d.color } : {}}
+                      aria-pressed={draft.dimension === d.id}
+                      className="px-3 py-2 rounded panel flex items-center gap-2 cursor-pointer select-none"
+                      style={draft.dimension === d.id
+                        ? { borderColor: d.color, background: d.color + '22', fontWeight: 700 }
+                        : {}}
                     >
-                      <span className="w-2 h-2 rounded-sm inline-block" style={{ background: d.color }} />{d.name}
+                      <span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: d.color }} />{d.name}
                     </button>
                   ))}
                   <div className="flex-1" />
@@ -534,9 +612,10 @@ export default function App() {
                     </button>
                     <span className="text-xs opacity-50">трудоёмкость / дни до дедлайна</span>
                   </div>
-                  {chunks.filter((c) => c.noteId === draft.id).length > 0 && (
+                  <div className="text-xs opacity-40 mt-1">Привычка: напиши «ежедневно» — чекбокс появится на каждый день.</div>
+                  {chunks.filter((c) => c.noteId === draft.id && !c.habit).length > 0 && (
                     <div className="mt-2">
-                      {chunks.filter((c) => c.noteId === draft.id).sort((a, b) => a.date < b.date ? -1 : 1).map((c) => (
+                      {chunks.filter((c) => c.noteId === draft.id && !c.habit).sort((a, b) => a.date < b.date ? -1 : 1).map((c) => (
                         <label key={c.id} className="flex items-center gap-2 text-sm py-0.5 cursor-pointer">
                           <input type="checkbox" checked={!!c.done} onChange={() => onToggleChunk(c)} />
                           <span className="opacity-60 text-xs">{c.date}</span>
@@ -599,23 +678,25 @@ export default function App() {
             )
           ) : tab === 'calendar' ? (
             <div className="max-w-4xl mx-auto">
-              <div className="flex items-center gap-2 mb-3">
-                <button className="panel rounded px-2 py-1 text-sm" onClick={() => setCursor((c) => c.m === 0 ? { y: c.y - 1, m: 11 } : { y: c.y, m: c.m - 1 })}>←</button>
-                <b className="capitalize">{monthName}</b>
-                <button className="panel rounded px-2 py-1 text-sm" onClick={() => setCursor((c) => c.m === 11 ? { y: c.y + 1, m: 0 } : { y: c.y, m: c.m + 1 })}>→</button>
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <button className="panel rounded px-2 py-1 text-sm" onClick={() => stepCal(-1)}>←</button>
+                <b className="capitalize">{calView === 'month' ? monthName : `Неделя ${weekTitle}`}</b>
+                <button className="panel rounded px-2 py-1 text-sm" onClick={() => stepCal(1)}>→</button>
                 <div className="flex-1" />
-                <span className="text-xs opacity-50">regex: «дедлайн: ДД.ММ[.ГГГГ]»</span>
+                <button className="text-xs px-2 py-1 rounded panel" style={calView === 'month' ? { borderColor: 'var(--accent)' } : {}} onClick={() => switchCalView('month')}>Месяц</button>
+                <button className="text-xs px-2 py-1 rounded panel" style={calView === 'week' ? { borderColor: 'var(--accent)' } : {}} onClick={() => switchCalView('week')}>Неделя</button>
               </div>
+              <div className="text-xs opacity-50 mb-2">даты из текста: «дедлайн: 30.09», «завтра», «в пятницу»</div>
               <div className="grid grid-cols-7 gap-1 text-xs opacity-50 mb-1">
                 {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((d) => <div key={d} className="text-center">{d}</div>)}
               </div>
               <div className="grid grid-cols-7 gap-1">
-                {monthCells.map((d, i) => {
+                {cells.map((d, i) => {
                   const k = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
                   const items = byDay[k] || []
                   const dayChunks = chunksByDate[dayKey(d)] || []
                   const leftH = dayChunks.filter((x) => !x.chunk.done).reduce((s, x) => s + x.chunk.hours, 0)
-                  const inMonth = d.getMonth() === cursor.m
+                  const inMonth = calView === 'month' ? d.getMonth() === cursor.m : true
                   const isToday = d.toDateString() === today.toDateString()
                   return (
                     <div
@@ -633,7 +714,7 @@ export default function App() {
                           <span key={j} title={note.title} className="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: dimById[note.dimension]?.color }} />
                         ))}
                       </div>
-                      {leftH > 0 && <div className="text-[10px] opacity-70">{leftH} ч.</div>}
+                      {leftH > 0 && <div className="text-[10px] opacity-70">{f1(leftH)} ч.</div>}
                     </div>
                   )
                 })}
@@ -659,8 +740,8 @@ export default function App() {
               </div>
 
               <div className="panel rounded p-3 mt-4">
-                <div className="text-xs uppercase opacity-50 mb-2">Чанки: {fmtDate(focusDay)} (выполненные открывают пиксели)</div>
-                {focusChunks.length === 0 && <div className="text-sm opacity-50">На этот день чанков нет.</div>}
+                <div className="text-xs uppercase opacity-50 mb-2">Чанки и привычки: {fmtDate(focusDay)} (выполненные открывают пиксели)</div>
+                {focusChunks.length === 0 && habitItems.length === 0 && <div className="text-sm opacity-50">На этот день чанков нет.</div>}
                 {focusChunks.map(({ chunk, note }) => {
                   const overdue = chunk.date < todayISO() && !chunk.done
                   return (
@@ -675,6 +756,15 @@ export default function App() {
                     </label>
                   )
                 })}
+                {habitItems.map(({ chunk, note }) => (
+                  <label key={chunk.id} className="flex items-center gap-2 text-sm py-1 cursor-pointer border-b last:border-0" style={{ borderColor: 'var(--border)' }}>
+                    <input type="checkbox" checked={!!chunk.done} onChange={() => onToggleHabit(note.id, focusKey)} />
+                    <span className="w-2 h-2 rounded-sm" style={{ background: dimById[note.dimension]?.color }} />
+                    <b>{note.title}</b>
+                    <span className="flex-1" />
+                    <span className="text-xs opacity-60">привычка · ежедневно</span>
+                  </label>
+                ))}
               </div>
             </div>
           ) : tab === 'graph' ? (

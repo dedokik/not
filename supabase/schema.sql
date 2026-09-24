@@ -25,15 +25,21 @@ create table if not exists links (
   unique (from_id, to_id)
 );
 
--- ежедневные чанки auto-chunking
+-- ежедневные чанки auto-chunking + привычки (habit = чекбокс на каждый день)
 create table if not exists chunks (
   id uuid primary key default gen_random_uuid(),
   note_id uuid not null references notes(id) on delete cascade,
   day date not null,
   hours numeric not null default 0,
   done boolean not null default false,
-  unique (note_id, day)
+  habit boolean not null default false,
+  unique (note_id, day, habit)
 );
+-- миграция для баз, созданных до появления habit:
+alter table chunks drop constraint if exists chunks_note_id_day_key;
+alter table chunks add column if not exists habit boolean not null default false;
+alter table chunks drop constraint if exists chunks_note_day_habit_key;
+alter table chunks add constraint chunks_note_day_habit_key unique (note_id, day, habit);
 
 create table if not exists pixels (
   x int not null,

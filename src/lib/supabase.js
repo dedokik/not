@@ -81,6 +81,17 @@ async function pullNotes(sb) {
   return n
 }
 
+// Измерения: upsert по id. Вызывается ПЕРВЫМ — заметки ссылаются на dimensions по FK.
+async function pushDimensions(sb) {
+  const dims = await db.dimensions.toArray()
+  if (dims.length) {
+    await sb.from('dimensions').upsert(
+      dims.map((d) => ({ id: d.id, name: d.name, color: d.color })),
+      { onConflict: 'id' }
+    )
+  }
+}
+
 async function pushRest(sb) {
   // связи/чанки/пиксели: wholesale replace (один пользователь)
   const noteMap = await getSetting('cloudIds', {})
@@ -90,7 +101,7 @@ async function pushRest(sb) {
     .map((l) => ({ from_id: idOf(l.fromId), to_id: idOf(l.toId) }))
     .filter((l) => l.from_id && l.to_id)
   const chunks = (await db.chunks.toArray())
-    .map((c) => ({ note_id: idOf(c.noteId), day: c.date, hours: c.hours, done: !!c.done }))
+    .map((c) => ({ note_id: idOf(c.noteId), day: c.date, hours: c.hours, done: !!c.done, habit: !!c.habit }))
     .filter((c) => c.note_id)
   const pixels = (await db.pixels.toArray())
     .map((p) => ({ x: p.x, y: p.y, note_id: idOf(p.noteId), opened_at: new Date(p.openedAt).toISOString() }))
@@ -101,15 +112,6 @@ async function pushRest(sb) {
   if (links.length) await sb.from('links').insert(links)
   if (chunks.length) await sb.from('chunks').insert(chunks)
   if (pixels.length) await sb.from('pixels').insert(pixels)
-
-  // измерения (включая пользовательские): upsert по id
-  const dims = await db.dimensions.toArray()
-  if (dims.length) {
-    await sb.from('dimensions').upsert(
-      dims.map((d) => ({ id: d.id, name: d.name, color: d.color })),
-      { onConflict: 'id' }
-    )
-  }
 }
 
 // Pull связей/чанков/пикселей: облако -> локально (идемпотентно, без дублей).
@@ -121,13 +123,21 @@ async function pullRest(sb) {
     return k && k.startsWith('note:') ? Number(k.slice(5)) : null
   }
   let links = 0, chunks = 0
+  // измерения тянем ПЕРВЫМИ — иначе заметки с кастомным измерением нечем показать
+  const { data: rd } = await sb.from('dimensions').select('*')
+  for (const r of rd || []) {
+    const ex = await db.dimensions.get(r.id)
+    if (!ex) await db.dimensions.add({ id: r.id, name: r.name, color: r.color })
+    else if (ex.name !== r.name || ex.color !== r.color) await db.dimensions.put({ ...ex, name: r.name, color: r.color })
+  }
   const { data: rl } = await sb.from('links').select('*')
+  const existingLinks = await db.links.toArray()
   for (const r of rl || []) {
     const f = localNoteId(r.from_id), t = localNoteId(r.to_id)
     if (!f || !t) continue
-    const all = await db.links.toArray()
-    if (!all.some((l) => l.fromId === f && l.toId === t)) {
-      await db.links.add({ fromId: f, toId: t })
+    if (!existingLinks.some((l) => l.fromId === f && l.toId === t)) {
+      const id = await db.links.add({ fromId: f, toId: t })
+      existingLinks.push({ id, fromId: f, toId: t })
       links++
     }
   }
@@ -135,14 +145,15 @@ async function pullRest(sb) {
   for (const r of rc || []) {
     const nid = localNoteId(r.note_id)
     if (!nid) continue
-    const ex = await db.chunks.where('noteId').equals(nid).filter((c) => c.date === r.day).first()
+    const hb = !!r.habit
+    const ex = await db.chunks.where('noteId').equals(nid).filter((c) => c.date === r.day && !!c.habit === hb).first()
     if (ex) {
       if (!!ex.done !== !!r.done || Number(ex.hours) !== Number(r.hours)) {
         await db.chunks.update(ex.id, { hours: Number(r.hours), done: r.done ? 1 : 0 })
         chunks++
       }
     } else {
-      await db.chunks.add({ noteId: nid, date: r.day, hours: Number(r.hours), done: r.done ? 1 : 0 })
+      await db.chunks.add({ noteId: nid, date: r.day, hours: Number(r.hours), done: r.done ? 1 : 0, habit: hb ? 1 : 0 })
       chunks++
     }
   }
@@ -160,6 +171,7 @@ export async function syncNow() {
   const sb = cloud()
   if (!sb) return { ok: false, reason: 'Нет VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (.env)' }
   try {
+    await pushDimensions(sb)
     await pushNotes(sb)
     const pulled = await pullNotes(sb)
     const rest = await pullRest(sb)

@@ -2,7 +2,7 @@
   "name": "not",
   "version": "0.1.0-mvp",
   "type": "module",
-  "description": "Not — Minimal Dark OS, MVP: notes + calendar",
+  "description": "NotMozgi — Minimal Dark OS: notes, calendar, graph, habits, pixel map",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
