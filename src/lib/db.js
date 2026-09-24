@@ -1,0 +1,82 @@
+import Dexie from 'dexie'
+
+export const DIMENSIONS = [
+  { id: 'study', name: 'Учёба', color: '#8b5cf6' },
+  { id: 'personal', name: 'Личное', color: '#10b981' },
+  { id: 'projects', name: 'Проекты', color: '#f59e0b' },
+]
+
+export const MAP_W = 100
+export const MAP_H = 50
+
+export const db = new Dexie('not-dark-os')
+db.version(1).stores({
+  notes: '++id, dimension, updatedAt',
+  settings: 'key',
+})
+// v2: ручные связи, чанки плана, пиксели карты
+db.version(2).stores({
+  notes: '++id, dimension, updatedAt',
+  settings: 'key',
+  links: '++id, fromId, toId',
+  chunks: '++id, noteId, date, done',
+  pixels: '[x+y], noteId, openedAt',
+})
+// v3: измерения стали динамическими (свои названия и цвета)
+db.version(3).stores({
+  notes: '++id, dimension, updatedAt',
+  settings: 'key',
+  links: '++id, fromId, toId',
+  chunks: '++id, noteId, date, done',
+  pixels: '[x+y], noteId, openedAt',
+  dimensions: 'id',
+})
+
+export async function seedDimensions() {
+  const count = await db.dimensions.count()
+  if (count > 0) return
+  await db.dimensions.bulkAdd(DIMENSIONS.map((d) => ({ ...d })))
+}
+
+export async function seedIfEmpty() {
+  const count = await db.notes.count()
+  if (count > 0) return
+  const now = Date.now()
+  await db.notes.bulkAdd([
+    {
+      title: 'Добро пожаловать',
+      body: '# Привет\n\nЭто Not: заметки + календарь + граф + карта.\n\n- [ ] Создать заметку в измерении Учёба\n- [ ] Написать `дедлайн: 30.09` и `оценка: 6ч` в тексте\n- [x] Открыть календарь\n\nСвязь с релизом: [[MVP релиз]]\n\nдедлайн: 30.09',
+      dimension: 'study',
+      estimateHours: 6,
+      updatedAt: now,
+    },
+    {
+      title: 'Купить продукты',
+      body: '## Список\n\n- [ ] Молоко\n- [ ] Хлеб\n\nдедлайн: 26.09',
+      dimension: 'personal',
+      estimateHours: 1,
+      updatedAt: now,
+    },
+    {
+      title: 'MVP релиз',
+      body: '# Проекты\n\nДоделать каркас и показать на телефоне по Wi-Fi.\n\n**дедлайн: 28.09**',
+      dimension: 'projects',
+      estimateHours: 4,
+      updatedAt: now,
+    },
+  ])
+}
+
+export async function getSetting(key, fallback) {
+  const row = await db.settings.get(key)
+  return row ? row.value : fallback
+}
+
+export async function setSetting(key, value) {
+  await db.settings.put({ key, value })
+}
+
+// --- пиксели: n-й открытый пиксель (row-major порядок) ---
+export function pixelCoord(n) {
+  return { x: n % MAP_W, y: Math.floor(n / MAP_W) % MAP_H }
+}

@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #121212;
+  --panel: #1e1e1e;
+  --panel-2: #252526;
+  --text: #e0e0e0;
+  --border: #333333;
+  --accent: #d1d5db;
+  --danger: #ef4444;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.accent-text { color: var(--accent); }
+.accent-bg { background: var(--accent); }
+.accent-border { border-color: var(--accent); }
+.danger-text { color: var(--danger); }
+
+textarea, input[type="text"], input[type="number"], select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  outline: none;
+}
+textarea:focus, input[type="text"]:focus, input[type="number"]:focus, select:focus {
+  border-color: var(--accent);
+}
+option {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+/* markdown preview */
+.md h1 { font-size: 1.4rem; font-weight: 700; margin: 0.6em 0 0.4em; }
+.md h2 { font-size: 1.2rem; font-weight: 700; margin: 0.6em 0 0.4em; }
+.md h3 { font-size: 1.05rem; font-weight: 700; margin: 0.5em 0 0.3em; }
+.md p { margin: 0.4em 0; line-height: 1.55; }
+.md strong { font-weight: 700; }
+.md ul { padding-left: 1.2em; list-style: disc; }
+.md li { margin: 0.25em 0; }
+.md code { background: #111; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
