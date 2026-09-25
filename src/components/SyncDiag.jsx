@@ -60,17 +60,34 @@ export default function SyncDiag({ onSynced }) {
 
       // какие именно заметки где: ловим расхождение наборов (устройства держат разные тройки)
       try {
+        const map = await getSetting('cloudIds', {})
+        const tstr = (ts) => { try { return new Date(ts).toLocaleTimeString('ru-RU') } catch { return '?' } }
+        r['привязки'] = Object.entries(map)
+          .filter(([k]) => k.startsWith('note:'))
+          .map(([k, v]) => `${k.slice(5)}→${String(v).slice(0, 8)}`)
+          .join(' | ') || '—'
         const localNotes = await db.notes.toArray()
         r['названия локально'] = localNotes.map((n) => `${n.id}:${(n.title || '').slice(0, 40)}`).join(' | ') || '—'
+        r['локально детально'] = localNotes
+          .map((n) => `#${n.id} «${(n.title || '').slice(0, 25)}» upd ${tstr(n.updatedAt)}`)
+          .join(' | ') || '—'
         const sb2 = cloud()
         if (sb2) {
-          const cn = await sb2.from('notes').select('id,title').order('updated_at', { ascending: true })
+          const cn = await sb2.from('notes').select('id,title,updated_at,body').order('updated_at', { ascending: true })
           r['названия в облаке'] = cn.error
             ? `ОШИБКА: ${cn.error.message}`
             : (cn.data || []).map((n) => `${String(n.id).slice(0, 8)}:${(n.title || '').slice(0, 40)}`).join(' | ') || '—'
+          r['облако детально'] = cn.error
+            ? `ОШИБКА: ${cn.error.message}`
+            : (cn.data || []).map((n) => `${String(n.id).slice(0, 8)} «${(n.title || '').slice(0, 25)}» upd ${tstr(n.updated_at)} «${(n.body || '').slice(0, 30)}»`).join(' | ') || '—'
         }
       } catch (e) {
         r['названия'] = `не прочитались: ${e.message}`
+      }
+      try {
+        r['журнал синка'] = (await getSetting('syncLog', [])).join('  //  ') || 'пусто'
+      } catch {
+        r['журнал синка'] = 'не прочитался'
       }
 
       // прямой доступ до Supabase (мимо библиотек): отличаем блок сети от плохого ключа.

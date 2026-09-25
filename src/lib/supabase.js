@@ -34,11 +34,33 @@ async function rememberCloudId(localId, cloudId) {
   await setSetting('cloudIds', map)
 }
 
+// Журнал синка (последние 40 строк, переживает перезагрузку) — видно в Диагностике.
+export async function logSync(msg) {
+  try {
+    const log = await getSetting('syncLog', [])
+    log.push(`${new Date().toLocaleTimeString('ru-RU')} ${msg}`)
+    while (log.length > 40) log.shift()
+    await setSetting('syncLog', log)
+  } catch { /* журнал не должен ронять синк */ }
+}
+
+// Push только изменённого: хэш содержимого храним локально, идентичное не заливаем.
+// Иначе каждый фоновый опрос перезаписывал бы всё и спамил журнал + облако.
+const hashNote = (n) => `${n.title || ''}|${n.body || ''}|${n.dimension || ''}|${Number(n.estimateHours) || 0}`
+
+export async function markPushed(localId, note) {
+  const h = await getSetting('pushedHash', {})
+  h[localId] = hashNote(note)
+  await setSetting('pushedHash', h)
+}
+
 // Push заметки: upsert по cloudId, локально запоминаем соответствие.
 // Ошибки (напр. RLS) бросаем наружу — тихий "Ок" при незалитых данных хуже ошибки.
 async function pushNotes(sb) {
   const notes = await db.notes.toArray()
+  const pushed = await getSetting('pushedHash', {})
   for (const n of notes) {
+    if (pushed[`note:${n.id}`] === hashNote(n)) continue // не менялась — пропускаем
     const existing = await cloudIdFor(`note:${n.id}`)
     const row = {
       title: n.title,
@@ -55,12 +77,17 @@ async function pushNotes(sb) {
         const ins = await sb.from('notes').insert(row).select('id').single()
         if (ins.error) throw new Error(`push: ${ins.error.message}`)
         if (ins.data) await rememberCloudId(`note:${n.id}`, ins.data.id)
+        await logSync(`push recreate note:${n.id}`)
+      } else {
+        await logSync(`push upd note:${n.id}`)
       }
     } else {
       const { data, error } = await sb.from('notes').insert(row).select('id').single()
       if (error) throw new Error(`push: ${error.message}`)
       if (data) await rememberCloudId(`note:${n.id}`, data.id)
+      await logSync(`push +note:${n.id}`)
     }
+    await markPushed(`note:${n.id}`, n)
   }
 }
 
@@ -99,6 +126,8 @@ async function pullNotes(sb) {
           Number(local.estimateHours || 0) === Number(patch.estimateHours || 0)
         if (!same) {
           await db.notes.update(id, patch)
+          await markPushed(`note:${id}`, patch)
+          await logSync(`pull ~note:${id}`)
           n++
         }
       }
@@ -124,10 +153,14 @@ async function pullNotes(sb) {
           patch.updatedAt = twin.updatedAt
         }
         await db.notes.update(twin.id, patch)
+        await markPushed(`note:${twin.id}`, patch)
+        await logSync(`pull adopt note:${twin.id}`)
         n++
       } else {
         const id = await db.notes.add({ ...patch })
         await rememberCloudId(`note:${id}`, r.id)
+        await markPushed(`note:${id}`, patch)
+        await logSync(`pull +note:${id}`)
         n++
       }
     }
@@ -291,7 +324,7 @@ export async function cleanupDuplicates() {
   return { removed, merged, adopted }
 }
 
-export async function syncNow() {
+export async function syncNow(opts = {}) {
   const sb = cloud()
   if (!sb) return { ok: false, reason: 'Нет VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (.env)' }
   try {
@@ -301,8 +334,13 @@ export async function syncNow() {
     const rest = await pullRest(sb)
     await pushRest(sb)
     await setSetting('lastSync', new Date().toISOString())
+    // тихие фоновые синки пишут итог только если что-то реально приехало/уехало
+    if (!opts.quiet || pulled || rest.links || rest.chunks) {
+      await logSync(`ok pulled=${pulled} links=${rest.links} chunks=${rest.chunks}`)
+    }
     return { ok: true, pulled, pulledLinks: rest.links, pulledChunks: rest.chunks }
   } catch (e) {
+    await logSync(`FAIL ${String(e.message || e).slice(0, 140)}`)
     return { ok: false, reason: String(e.message || e) }
   }
 }

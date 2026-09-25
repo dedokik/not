@@ -140,7 +140,7 @@ export default function App() {
       await refresh()
       // тихий автосинк при старте, чтобы с другого устройства всё подтянулось само
       if (cloudEnabled) {
-        const r = await syncNow()
+        const r = await syncNow({ quiet: true })
         if (r.ok) { await refresh(); markSynced() }
         else setSyncMsg(`Автосинк: ${r.reason}`)
       }
@@ -154,7 +154,7 @@ export default function App() {
     if (!cloudEnabled || syncing.current || document.visibilityState !== 'visible') return
     syncing.current = true
     try {
-      const r = await syncNow()
+      const r = await syncNow({ quiet: true })
       if (r.ok) { await refresh(); markSynced() }
     } finally {
       syncing.current = false
@@ -178,7 +178,7 @@ export default function App() {
       if (document.visibilityState !== 'visible' || !cloudEnabled || syncing.current) return
       syncing.current = true
       try {
-        const r = await syncNow()
+        const r = await syncNow({ quiet: true })
         const all2 = await db.notes.toArray()
         const t = await recalcMissed(all2)
         if (r.ok || t) await refresh()
