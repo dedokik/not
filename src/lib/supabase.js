@@ -59,6 +59,7 @@ export async function markPushed(localId, note) {
 async function pushNotes(sb) {
   const notes = await db.notes.toArray()
   const pushed = await getSetting('pushedHash', {})
+  const seen = await getSetting('seenHash', {})
   for (const n of notes) {
     if (pushed[`note:${n.id}`] === hashNote(n)) continue // не менялась — пропускаем
     const existing = await cloudIdFor(`note:${n.id}`)
@@ -88,21 +89,25 @@ async function pushNotes(sb) {
       await logSync(`push +note:${n.id}`)
     }
     await markPushed(`note:${n.id}`, n)
+    // только что залитое — уже "виденное", иначе следующий pull примет своё же за чужое
+    const cid = await cloudIdFor(`note:${n.id}`)
+    if (cid) seen[cid] = `${row.title}||${row.body}||${row.dimension}||${Number(row.estimate_hours) || 0}`
   }
+  await setSetting('seenHash', seen)
 }
 
-// Pull: забираем облачные заметки новее lastSync, которых нет локально / которые новее.
+// Pull БЕЗ фильтра по дате: часы устройств прыгают (видели скачок ~14 мин на ПК),
+// любой временной фильтр рано или поздно теряет чужие правки навсегда.
+// Качаем всё (заметок мало) и сравниваем по содержимому:
+// seenHash[cloudId] — что уже видели; различие = кто-то поменял.
+// Конфликт (поменяли оба) — оставляем локальное, оно уедет следующим push; пишем в журнал.
 async function pullNotes(sb) {
-  const lastSync = await getSetting('lastSync', null)
-  const lastSyncMs = lastSync ? new Date(lastSync).getTime() : 0
-  let q = sb.from('notes').select('*').order('updated_at', { ascending: true })
-  // запас −5 мин: часы устройств расходятся, без него чужие правки со старым
-  // штампом выпадают из выборки навсегда и правило ниже их даже не видит
-  if (lastSync) q = q.gt('updated_at', new Date(lastSyncMs - 5 * 60 * 1000).toISOString())
-  const { data, error } = await q
+  const { data, error } = await sb.from('notes').select('*').order('updated_at', { ascending: true })
   if (error || !data) return 0
   const map = await getSetting('cloudIds', {})
+  const seen = await getSetting('seenHash', {})
   const rev = Object.fromEntries(Object.entries(map).map(([k, v]) => [v, k]))
+  const hOf = (t, b, d, e) => `${t || ''}||${b || ''}||${d || ''}||${Number(e) || 0}`
   let n = 0
   for (const r of data) {
     const localKey = rev[r.id]
@@ -116,20 +121,18 @@ async function pullNotes(sb) {
     if (localKey && localKey.startsWith('note:')) {
       const id = Number(localKey.slice(5))
       const local = await db.notes.get(id)
-      // принимаем облако если оно новее ИЛИ если локальную не трогали со прошлого синка
-      // (второе спасает при рассинхроне часов между устройствами: untreated local + changed cloud = берём cloud)
-      if (local && (local.updatedAt < patch.updatedAt || (lastSyncMs && local.updatedAt <= lastSyncMs))) {
-        // в окне повтора не перезаписываем идентичное — иначе вечный churn меток времени
-        const same = (local.title || '') === (patch.title || '') &&
-          (local.body || '') === (patch.body || '') &&
-          (local.dimension || '') === (patch.dimension || '') &&
-          Number(local.estimateHours || 0) === Number(patch.estimateHours || 0)
-        if (!same) {
-          await db.notes.update(id, patch)
-          await markPushed(`note:${id}`, patch)
-          await logSync(`pull ~note:${id}`)
-          n++
-        }
+      if (!local) continue
+      const h = hOf(r.title, r.body, r.dimension, r.estimate_hours)
+      if (seen[r.id] === h) continue // уже видели — ничего нового
+      if (seen[r.id] === undefined || hOf(local.title, local.body, local.dimension, local.estimateHours) === seen[r.id]) {
+        // облако поменялось, а локальную с прошлого раза не трогали (или видим впервые) — забираем
+        await db.notes.update(id, patch)
+        await markPushed(`note:${id}`, patch)
+        seen[r.id] = h
+        await logSync(`pull ~note:${id}`)
+        n++
+      } else {
+        await logSync(`conflict note:${id} kept local`)
       }
     } else {
       // маппинга нет: может, это та же заметка с другого устройства
@@ -154,17 +157,20 @@ async function pullNotes(sb) {
         }
         await db.notes.update(twin.id, patch)
         await markPushed(`note:${twin.id}`, patch)
+        seen[r.id] = hOf(patch.title, patch.body, patch.dimension, patch.estimateHours)
         await logSync(`pull adopt note:${twin.id}`)
         n++
       } else {
         const id = await db.notes.add({ ...patch })
         await rememberCloudId(`note:${id}`, r.id)
         await markPushed(`note:${id}`, patch)
+        seen[r.id] = hOf(patch.title, patch.body, patch.dimension, patch.estimateHours)
         await logSync(`pull +note:${id}`)
         n++
       }
     }
   }
+  await setSetting('seenHash', seen)
   return n
 }
 
