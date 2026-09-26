@@ -49,6 +49,18 @@ create table if not exists pixels (
   primary key (x, y)
 );
 
+-- события календаря: день + подпись, отдельно от заметок.
+-- id текстовый и стабильный на всех устройствах (ev...), deleted = soft-delete:
+-- удаление расходится синком и никогда не воскресает.
+create table if not exists events (
+  id text primary key,
+  day date not null,
+  title text not null default '',
+  dimension text references dimensions(id) on delete set null,
+  deleted boolean not null default false,
+  updated_at timestamptz not null default now()
+);
+
 insert into dimensions (id, name, color) values
   ('study', 'Учёба', '#8b5cf6'),
   ('personal', 'Личное', '#10b981'),
@@ -60,6 +72,7 @@ alter table pixels enable row level security;
 alter table dimensions enable row level security;
 alter table links enable row level security;
 alter table chunks enable row level security;
+alter table events enable row level security;
 
 -- Для старта (один пользователь, anon-доступ) — простые политики.
 -- Позже замени на auth.uid()-политики.
@@ -69,8 +82,10 @@ drop policy if exists "allow all" on pixels;
 drop policy if exists "allow all" on dimensions;
 drop policy if exists "allow all" on links;
 drop policy if exists "allow all" on chunks;
+drop policy if exists "allow all" on events;
 create policy "allow all" on notes for all using (true) with check (true);
 create policy "allow all" on pixels for all using (true) with check (true);
 create policy "allow all" on dimensions for all using (true) with check (true);
 create policy "allow all" on links for all using (true) with check (true);
 create policy "allow all" on chunks for all using (true) with check (true);
+create policy "allow all" on events for all using (true) with check (true);

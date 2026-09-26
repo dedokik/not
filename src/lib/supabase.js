@@ -330,21 +330,72 @@ export async function cleanupDuplicates() {
   return { removed, merged, adopted }
 }
 
+// События календаря: стабильные текстовые id на всех устройствах, upsert по id
+// (без wholesale-удаления), удаление — только soft-delete флагом, поэтому
+// никогда не воскресает. Терпим к отсутствию таблицы (старый облачный SQL).
+async function pushEvents(sb) {
+  try {
+    const evs = await db.events.toArray()
+    if (!evs.length) return 0
+    const { error } = await sb.from('events').upsert(
+      evs.map((e) => ({
+        id: e.id, day: e.date, title: e.title || '', dimension: e.dimension || null,
+        deleted: !!e.deleted, updated_at: new Date(e.updatedAt).toISOString(),
+      })),
+      { onConflict: 'id' }
+    )
+    if (error) throw error
+    return evs.length
+  } catch (e) {
+    await logSync(`events push skip: ${String(e.message || e).slice(0, 100)}`)
+    return 0
+  }
+}
+
+async function pullEvents(sb) {
+  try {
+    const { data, error } = await sb.from('events').select('*')
+    if (error) throw error
+    let n = 0
+    for (const r of data || []) {
+      const patch = {
+        id: r.id, date: r.day, title: r.title || '', dimension: r.dimension || null,
+        deleted: !!r.deleted, updatedAt: new Date(r.updated_at).getTime() || Date.now(),
+      }
+      const ex = await db.events.get(r.id)
+      if (!ex) {
+        await db.events.add(patch)
+        n++
+      } else if (ex.date !== patch.date || ex.title !== patch.title ||
+          (ex.dimension || null) !== patch.dimension || !!ex.deleted !== patch.deleted) {
+        await db.events.put(patch)
+        n++
+      }
+    }
+    return n
+  } catch (e) {
+    await logSync(`events pull skip: ${String(e.message || e).slice(0, 100)}`)
+    return 0
+  }
+}
+
 export async function syncNow(opts = {}) {
   const sb = cloud()
   if (!sb) return { ok: false, reason: 'Нет VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (.env)' }
   try {
     await pushDimensions(sb)
     await pushNotes(sb)
+    await pushEvents(sb)
     const pulled = await pullNotes(sb)
     const rest = await pullRest(sb)
+    const pulledEvents = await pullEvents(sb)
     await pushRest(sb)
     await setSetting('lastSync', new Date().toISOString())
     // тихие фоновые синки пишут итог только если что-то реально приехало/уехало
-    if (!opts.quiet || pulled || rest.links || rest.chunks) {
-      await logSync(`ok pulled=${pulled} links=${rest.links} chunks=${rest.chunks}`)
+    if (!opts.quiet || pulled || rest.links || rest.chunks || pulledEvents) {
+      await logSync(`ok pulled=${pulled} links=${rest.links} chunks=${rest.chunks} events=${pulledEvents}`)
     }
-    return { ok: true, pulled, pulledLinks: rest.links, pulledChunks: rest.chunks }
+    return { ok: true, pulled, pulledLinks: rest.links, pulledChunks: rest.chunks, pulledEvents }
   } catch (e) {
     await logSync(`FAIL ${String(e.message || e).slice(0, 140)}`)
     return { ok: false, reason: String(e.message || e) }

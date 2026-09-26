@@ -53,6 +53,9 @@ export default function App() {
   const [links, setLinks] = useState([])
   const [chunks, setChunks] = useState([])
   const [pixelRows, setPixelRows] = useState([])
+  const [events, setEvents] = useState([])
+  const [evTitle, setEvTitle] = useState('')
+  const [evDim, setEvDim] = useState('')
   const [dims, setDims] = useState(DEFAULT_DIMS)
   const [activeId, setActiveId] = useState(null)
   const [enabledDims, setEnabledDims] = useState(new Set(DEFAULT_DIMS.map((d) => d.id)))
@@ -99,17 +102,19 @@ export default function App() {
   }
 
   const refresh = async () => {
-    const [all, al, ac, ap, ad] = await Promise.all([
+    const [all, al, ac, ap, ad, ae] = await Promise.all([
       db.notes.orderBy('updatedAt').reverse().toArray(),
       db.links.toArray(),
       db.chunks.toArray(),
       db.pixels.toArray(),
       db.dimensions.toArray(),
+      db.events.toArray(),
     ])
     setIfChanged(setNotes)(all)
     setIfChanged(setLinks)(al)
     setIfChanged(setChunks)(ac)
     setIfChanged(setPixelRows)(ap)
+    setIfChanged(setEvents)(ae)
     if (ad.length) {
       setIfChanged(setDims)(ad)
       // новые измерения включаем автоматически, выбор пользователя не трогаем
@@ -144,6 +149,14 @@ export default function App() {
         if (r.ok) { await refresh(); markSynced() }
         else setSyncMsg(`Автосинк: ${r.reason}`)
       }
+      // ярлык "Новая заметка" с иконки приложения (manifest shortcuts → ?new=1)
+      try {
+        const q = new URLSearchParams(window.location.search)
+        if (q.get('new') === '1') {
+          window.history.replaceState({}, '', window.location.pathname)
+          await createNote()
+        }
+      } catch { /* не критично */ }
     })()
   }, [])
 
@@ -293,7 +306,7 @@ export default function App() {
     setSyncMsg('Синк…')
     try {
       const r = await syncNow()
-      setSyncMsg(r.ok ? `Ок: заметок ${r.pulled}, чанков ${r.pulledChunks || 0}` : `Ошибка: ${r.reason}`)
+      setSyncMsg(r.ok ? `Ок: заметок ${r.pulled}, чанков ${r.pulledChunks || 0}, событий ${r.pulledEvents || 0}` : `Ошибка: ${r.reason}`)
       if (r.ok) { await refresh(); markSynced() }
     } finally {
       syncing.current = false
@@ -431,6 +444,34 @@ export default function App() {
   }), [filtered, chunks, focusKey])
   const onToggleHabit = async (noteId, date) => {
     await toggleHabit(noteId, date, pixelsLib)
+    await refresh()
+    scheduleAutoPush()
+  }
+
+  // --- события календаря (день + подпись, без заметок) ---
+  const eventsByDate = useMemo(() => {
+    const map = {}
+    for (const e of events) {
+      if (e.deleted) continue
+      if (e.dimension && !enabledDims.has(e.dimension)) continue
+      if (!map[e.date]) map[e.date] = []
+      map[e.date].push(e)
+    }
+    return map
+  }, [events, enabledDims])
+  const focusEvents = eventsByDate[focusKey] || []
+  const addEvent = async () => {
+    const title = evTitle.trim()
+    if (!title) return
+    const id = `ev${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`
+    await db.events.add({ id, date: focusKey, title, dimension: evDim || null, deleted: 0, updatedAt: Date.now() })
+    setEvTitle('')
+    await refresh()
+    scheduleAutoPush()
+  }
+  const deleteEvent = async (id) => {
+    // soft-delete: флаг расходится синком и не воскресает
+    await db.events.update(id, { deleted: 1, updatedAt: Date.now() })
     await refresh()
     scheduleAutoPush()
   }
@@ -766,6 +807,7 @@ export default function App() {
                   const items = byDay[k] || []
                   const dayChunks = chunksByDate[dayKey(d)] || []
                   const leftH = dayChunks.filter((x) => !x.chunk.done).reduce((s, x) => s + x.chunk.hours, 0)
+                  const dayEvents = eventsByDate[dayKey(d)] || []
                   const inMonth = calView === 'month' ? d.getMonth() === cursor.m : true
                   const isToday = d.toDateString() === today.toDateString()
                   return (
@@ -785,6 +827,12 @@ export default function App() {
                         ))}
                       </div>
                       {leftH > 0 && <div className="text-[10px] opacity-70">{f1(leftH)} ч.</div>}
+                      {dayEvents.length > 0 && (
+                        <div className="text-[10px] opacity-90 truncate" title={dayEvents.map((e) => e.title).join(', ')}>
+                          <span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ background: dimById[dayEvents[0].dimension]?.color || 'var(--accent)' }} />
+                          {dayEvents[0].title}{dayEvents.length > 1 ? ` +${dayEvents.length - 1}` : ''}
+                        </div>
+                      )}
                     </div>
                   )
                 })}
@@ -835,6 +883,34 @@ export default function App() {
                     <span className="text-xs opacity-60">привычка · ежедневно</span>
                   </label>
                 ))}
+              </div>
+
+              <div className="panel rounded p-3 mt-4">
+                <div className="text-xs uppercase opacity-50 mb-2">События: {fmtDate(focusDay)} (без заметок)</div>
+                {focusEvents.length === 0 && <div className="text-sm opacity-50">На этот день ничего не запланировано.</div>}
+                {focusEvents.map((e) => (
+                  <div key={e.id} className="flex items-center gap-2 text-sm py-1 border-b last:border-0" style={{ borderColor: 'var(--border)' }}>
+                    <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: dimById[e.dimension]?.color || 'var(--accent)' }} />
+                    <span className="flex-1 truncate">{e.title}</span>
+                    <button className="text-xs opacity-40 hover:opacity-100 shrink-0" onClick={() => deleteEvent(e.id)}>✕</button>
+                  </div>
+                ))}
+                <div className="flex items-center gap-2 mt-2">
+                  <select value={evDim} onChange={(e) => setEvDim(e.target.value)} className="rounded px-1 py-1 text-sm shrink-0" title="Цвет события">
+                    <option value="">•</option>
+                    {dims.filter((d) => enabledDims.has(d.id)).map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="text" value={evTitle} placeholder="Уборка…"
+                    onChange={(e) => setEvTitle(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') addEvent() }}
+                    className="flex-1 min-w-0 rounded px-2 py-1 text-sm"
+                  />
+                  <button onClick={addEvent} className="px-3 py-1 rounded accent-bg text-black font-semibold text-sm shrink-0">+</button>
+                </div>
+                <div className="text-xs opacity-40 mt-1">Кликни день в сетке — и подпиши его здесь.</div>
               </div>
             </div>
           ) : tab === 'graph' ? (

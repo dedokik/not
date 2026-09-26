@@ -31,6 +31,16 @@ db.version(3).stores({
   pixels: '[x+y], noteId, openedAt',
   dimensions: 'id',
 })
+// v4: события календаря (день + подпись, отдельно от заметок; deleted = soft-delete для синка)
+db.version(4).stores({
+  notes: '++id, dimension, updatedAt',
+  settings: 'key',
+  links: '++id, fromId, toId',
+  chunks: '++id, noteId, date, done',
+  pixels: '[x+y], noteId, openedAt',
+  dimensions: 'id',
+  events: 'id, date',
+})
 
 export async function seedDimensions() {
   const count = await db.dimensions.count()
