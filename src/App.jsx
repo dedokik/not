@@ -9,6 +9,7 @@ import { cloudEnabled, syncNow, cloud, cleanupDuplicates } from './lib/supabase.
 import GraphView from './components/GraphView.jsx'
 import MapView from './components/MapView.jsx'
 import SyncDiag from './components/SyncDiag.jsx'
+import { checkDeadlines } from './lib/notify.js'
 
 function getTasks(body) {
   const lines = (body || '').split('\n')
@@ -68,7 +69,18 @@ export default function App() {
   const [weekAnchor, setWeekAnchor] = useState(() => new Date())
   const [syncMsg, setSyncMsg] = useState('')
   const [lastSyncAt, setLastSyncAt] = useState('')
+  const [notifState, setNotifState] = useState(() => (typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'))
+  const notesRef = useRef([])
+  notesRef.current = notes
   const markSynced = () => setLastSyncAt(new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }))
+  const enableNotif = async () => {
+    if (typeof Notification === 'undefined') return
+    try {
+      const p = await Notification.requestPermission()
+      setNotifState(p)
+      if (p === 'granted') checkDeadlines(notesRef.current)
+    } catch { /* ignore */ }
+  }
   const [linkTarget, setLinkTarget] = useState('')
   const [newDimName, setNewDimName] = useState('')
   const [newDimColor, setNewDimColor] = useState('#a1a1aa')
@@ -160,6 +172,13 @@ export default function App() {
     })()
   }, [])
 
+  // напоминания о дедлайнах: раз в минуту + через 5 сек после старта
+  useEffect(() => {
+    const tick = () => { try { checkDeadlines(notesRef.current) } catch { /* ignore */ } }
+    const id = setInterval(tick, 60000)
+    const t = setTimeout(tick, 5000)
+    return () => { clearInterval(id); clearTimeout(t) }
+  }, [])
   // автосинк при возврате на вкладку (с телефона пришло — на ПК подтянется само)
   // + периодический фоновый опрос, чтобы открытое приложение тоже подтягивало
   const bgSyncRef = useRef(null)
@@ -536,6 +555,14 @@ export default function App() {
         {cloudEnabled && lastSyncAt && (
           <span className="text-[11px] opacity-50 hidden sm:inline" title="Последний успешный синк">· {lastSyncAt}</span>
         )}
+        <button
+          onClick={enableNotif}
+          className="text-sm px-3 py-1 panel rounded"
+          style={notifState === 'granted' ? { borderColor: 'var(--accent)' } : {}}
+          title={notifState === 'granted' ? 'Напоминания о дедлайнах включены' : 'Включить напоминания о дедлайнах'}
+        >
+          {notifState === 'granted' ? 'Уведомления: вкл' : notifState === 'denied' ? 'Уведомления: блок' : 'Уведомления'}
+        </button>
       </header>
       {syncMsg && <div className="text-xs px-4 py-1 opacity-70 border-b" style={{ borderColor: 'var(--border)' }}>{syncMsg}</div>}
 
